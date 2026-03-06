@@ -16297,23 +16297,17 @@ function renderCmpBar(){
 // Using CFTC public disaggregated futures data
 
 // ══════════════════════════════════════════════════════════════════
-//  AUTO-FILL COT — v4
-//  • Precios: Yahoo Finance directo (CORS nativo, sin proxies)
-//  • COT:     Netlify Function /api/cot  (proxy serverless propio)
-//             con fallback directo a CFTC si corre en local
+//  AUTO-FILL COT — sin proxies, solo APIs con CORS nativo
 // ══════════════════════════════════════════════════════════════════
-
 async function autoFillCOT() {
   const btn    = document.getElementById('cotAutoFillBtn');
   const label  = document.getElementById('cotAutoFillLabel');
   const status = document.getElementById('cotAutoFillStatus');
-
   btn.disabled = true;
   status.style.display = 'block';
-  status.style.color   = 'var(--muted)';
+  status.style.color = 'var(--muted)';
   const log = (msg) => { status.textContent = msg; console.log('[COT]', msg); };
 
-  // Escribe valor en campo y dispara eventos
   const set = (id, val) => {
     if (val === null || val === undefined || val === '') return false;
     const el = document.getElementById(id);
@@ -16321,32 +16315,31 @@ async function autoFillCOT() {
     el.value = val;
     el.dispatchEvent(new Event('input',  { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    console.log('[COT] ✓', id, '←', val);
     return true;
   };
 
   try {
-    // ── 1. COT CFTC ──────────────────────────────────────────────
-    log('📡 Descargando COT (CFTC — Gold COMEX)...');
-    const cot = await _cot_fetchCFTC();
+    // ── 1. COT (CFTC — CORS nativo, sin proxy) ───────────────────
+    log('📡 Descargando COT (CFTC)...');
+    const cot = await _fetchCOTData();
     if (cot) {
       set('cot_mm_net',      cot.mmNet);
       set('cot_mm_change',   cot.mmChange);
       set('cot_prod_net',    cot.prodNet);
       set('cot_prod_change', cot.prodChange);
       if (!document.getElementById('cot_date').value) set('cot_date', cot.reportDate);
-      log('✓ COT (' + cot.reportDate + ') · Obteniendo precios...');
+      log('✓ COT OK · Obteniendo precios...');
     } else {
-      log('⚠ COT sin datos · Continuando con precios...');
+      log('⚠ COT sin datos · Continuando...');
     }
 
-    // ── 2. Precios via Yahoo Finance (CORS nativo, sin proxy) ─────
+    // ── 2. Precios — Yahoo Finance (CORS nativo real) ─────────────
     log('📈 Obteniendo XAU, DXY, VIX, 10Y...');
     const [xauR, dxyR, vixR, tnxR] = await Promise.allSettled([
-      _cot_yahoo('GC=F'),        // Gold Futures
-      _cot_yahoo('DX-Y.NYB'),    // DXY
-      _cot_yahoo('%5EVIX'),      // VIX
-      _cot_yahoo('%5ETNX'),      // 10Y Treasury
+      _fetchYahoo('GC=F'),        // Gold Futures
+      _fetchYahoo('DX-Y.NYB'),    // DXY
+      _fetchYahoo('%5EVIX'),      // VIX
+      _fetchYahoo('%5ETNX'),      // 10Y Treasury
     ]);
 
     const xau = xauR.status === 'fulfilled' ? xauR.value : null;
@@ -16359,13 +16352,13 @@ async function autoFillCOT() {
     if (vix) set('cot_vix',    vix);
     if (tnx) set('cot_yields', tnx);
 
-    // Fallback gold: Coinbase (CORS real, siempre funciona)
+    // Fallback gold: Coinbase API (CORS abierto siempre)
     if (!xau) {
-      const goldCB = await _cot_coinbaseGold();
-      if (goldCB) set('cot_price', goldCB);
+      const cb = await _fetchCoinbaseGold();
+      if (cb) set('cot_price', cb);
     }
 
-    // ── 3. Auto-sesgo COT ─────────────────────────────────────────
+    // ── 3. Auto-sesgo ─────────────────────────────────────────────
     const mmChg   = parseFloat(document.getElementById('cot_mm_change')?.value);
     const prodChg = parseFloat(document.getElementById('cot_prod_change')?.value);
     if (!isNaN(mmChg) && !isNaN(prodChg)) {
@@ -16381,21 +16374,19 @@ async function autoFillCOT() {
     const v   = (id) => !!document.getElementById(id)?.value;
     const tk  = (ok) => ok ? '✓' : '✗';
     const sum = [
-      'COT '  + tk(v('cot_mm_net')),
-      'XAU '  + tk(v('cot_price')),
-      'DXY '  + tk(v('cot_dxy')),
-      'VIX '  + tk(v('cot_vix')),
-      '10Y '  + tk(v('cot_yields')),
+      'COT ' + tk(v('cot_mm_net')),
+      'XAU ' + tk(v('cot_price')),
+      'DXY ' + tk(v('cot_dxy')),
+      'VIX ' + tk(v('cot_vix')),
+      '10Y ' + tk(v('cot_yields')),
     ].join(' · ');
-
     const allOk = ['cot_mm_net','cot_price','cot_dxy','cot_vix','cot_yields'].every(v);
     status.style.color = allOk ? 'var(--accent)' : 'var(--yellow)';
     log('✅ Completado — ' + sum + '  · Llena análisis y guarda');
 
-  } catch (err) {
+  } catch(err) {
     status.style.color = 'var(--red)';
     log('⚠ Error: ' + err.message);
-    console.error('[COT] fatal:', err);
   } finally {
     btn.disabled = false;
     label.textContent = '⚡ Auto-llenar COT (XAUUSD)';
@@ -16403,153 +16394,81 @@ async function autoFillCOT() {
   }
 }
 
-// ── Yahoo Finance — fetch directo (CORS nativo desde navegador) ───
-// Devuelve el último cierre disponible para el símbolo dado
-async function _cot_yahoo(symbol) {
-  // Yahoo Finance tiene CORS abierto para query1 y query2
-  // Usamos v8/finance/chart que devuelve OHLCV
+// ── CFTC — tiene CORS nativo abierto, no necesita proxy ──────────
+async function _fetchCOTData() {
+  const urls = [
+    'https://publicreporting.cftc.gov/resource/jun7-fc8e.json?cftc_commodity_code=088691&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=2',
+    'https://publicreporting.cftc.gov/resource/jun7-fc8e.json?$where=market_and_exchange_names%20like%20%27%25GOLD%25%27&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=2',
+  ];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(10000) });
+      if (!r.ok) continue;
+      const rows = await r.json();
+      if (!Array.isArray(rows) || !rows.length) continue;
+      const l = rows[0], p = rows[1] || null;
+      const mmL = +l.m_money_positions_long_all    || 0;
+      const mmS = +l.m_money_positions_short_all   || 0;
+      const prL = +l.prod_merc_positions_long_all  || 0;
+      const prS = +l.prod_merc_positions_short_all || 0;
+      if (mmL === 0 && mmS === 0) continue;
+      const mmNet   = mmL - mmS;
+      const prodNet = prL - prS;
+      const pmmNet  = p ? ((+p.m_money_positions_long_all   || 0) - (+p.m_money_positions_short_all  || 0)) : mmNet;
+      const pprod   = p ? ((+p.prod_merc_positions_long_all || 0) - (+p.prod_merc_positions_short_all || 0)) : prodNet;
+      const dateStr = (l.report_date_as_yyyy_mm_dd || '').slice(0, 10);
+      let reportDate = dateStr;
+      if (dateStr) {
+        const d = new Date(dateStr + 'T12:00:00');
+        const dow = d.getDay();
+        d.setDate(d.getDate() + (dow === 1 ? 0 : dow === 0 ? -6 : 1 - dow));
+        reportDate = d.toISOString().slice(0, 10);
+      }
+      return { mmNet: Math.round(mmNet), mmChange: Math.round(mmNet - pmmNet), prodNet: Math.round(prodNet), prodChange: Math.round(prodNet - pprod), reportDate };
+    } catch(e) { console.warn('[COT] CFTC error:', e.message); }
+  }
+  return null;
+}
+
+// ── Yahoo Finance — CORS nativo desde cualquier dominio ──────────
+async function _fetchYahoo(symbol) {
   const urls = [
     `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d`,
     `https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d`,
   ];
   for (const url of urls) {
     try {
-      const r = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0',
-          'Accept': 'application/json',
-        },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!r.ok) { console.warn('[COT] Yahoo', symbol, 'status', r.status); continue; }
+      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) continue;
       const d = await r.json();
       const closes = d?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
       if (!closes?.length) continue;
-      // Último cierre no-null
       for (let i = closes.length - 1; i >= 0; i--) {
         if (closes[i] !== null && closes[i] > 0) {
           console.log('[COT] Yahoo', symbol, '=', closes[i]);
           return parseFloat(closes[i]).toFixed(2);
         }
       }
-    } catch (e) {
-      console.warn('[COT] Yahoo', symbol, 'error:', e.message);
-    }
+    } catch(e) { console.warn('[COT] Yahoo', symbol, ':', e.message); }
   }
   return null;
 }
 
-// ── Coinbase — precio XAU/USD (CORS abierto, fallback para gold) ──
-async function _cot_coinbaseGold() {
+// ── Coinbase — fallback gold, CORS abierto garantizado ───────────
+async function _fetchCoinbaseGold() {
   try {
-    const r = await fetch('https://api.coinbase.com/v2/prices/XAU-USD/spot', {
-      signal: AbortSignal.timeout(6000),
-    });
+    const r = await fetch('https://api.coinbase.com/v2/prices/XAU-USD/spot', { signal: AbortSignal.timeout(6000) });
     if (!r.ok) return null;
     const d = await r.json();
     const p = d?.data?.amount;
-    if (p && +p > 100) {
-      console.log('[COT] Coinbase XAU =', p);
-      return parseFloat(p).toFixed(2);
-    }
-  } catch (e) {
-    console.warn('[COT] Coinbase gold:', e.message);
-  }
+    if (p && +p > 100) return parseFloat(p).toFixed(2);
+  } catch(e) { console.warn('[COT] Coinbase:', e.message); }
   return null;
 }
 
-// ── CFTC COT — Gold COMEX (dos estrategias) ───────────────────────
-async function _cot_fetchCFTC() {
-  // Estrategia A: Netlify Function propia (cuando está deployado en Netlify)
-  // El archivo netlify/functions/cot.js actúa como proxy sin restricciones CORS
-  if (location.hostname.includes('netlify.app') || location.hostname.includes('netlify.com') ||
-      (!location.hostname.includes('localhost') && !location.hostname.includes('127.0.0.1') && location.hostname !== '')) {
-    try {
-      const r = await fetch('/api/cot', { signal: AbortSignal.timeout(12000) });
-      if (r.ok) {
-        const data = await r.json();
-        if (data?.mmNet !== undefined) {
-          console.log('[COT] Netlify Function OK:', data);
-          return data;
-        }
-        console.warn('[COT] Netlify Function returned:', data);
-      } else {
-        console.warn('[COT] Netlify Function status:', r.status);
-      }
-    } catch (e) {
-      console.warn('[COT] Netlify Function error:', e.message);
-    }
-  }
-
-  // Estrategia B: CFTC directo (funciona en local / file://)
-  // Dataset: Disaggregated Futures Only — Gold COMEX (código 088691)
-  const ENDPOINTS = [
-    // Dataset principal disaggregated
-    'https://publicreporting.cftc.gov/resource/jun7-fc8e.json?cftc_commodity_code=088691&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=2',
-    // Dataset alternativo — filter by name
-    'https://publicreporting.cftc.gov/resource/jun7-fc8e.json?$where=market_and_exchange_names%20like%20%27%25GOLD%25%27&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=2',
-    // Dataset "dea" (Commitments of Traders)
-    'https://publicreporting.cftc.gov/resource/dea/json?cftc_commodity_code=088691&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=2',
-  ];
-
-  for (const url of ENDPOINTS) {
-    try {
-      const r = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!r.ok) { console.warn('[COT] CFTC direct status', r.status, url); continue; }
-      const rows = await r.json();
-      if (!Array.isArray(rows) || !rows.length) { console.warn('[COT] CFTC empty:', url); continue; }
-      const result = _cot_parseCFTCRows(rows);
-      if (result) return result;
-    } catch (e) {
-      console.warn('[COT] CFTC direct error:', e.message);
-    }
-  }
-  return null;
-}
-
-function _cot_parseCFTCRows(rows) {
-  const l = rows[0], p = rows[1] || null;
-  console.log('[COT] CFTC row:', l.report_date_as_yyyy_mm_dd,
-    'MM_L:', l.m_money_positions_long_all,
-    'MM_S:', l.m_money_positions_short_all);
-
-  const mmL  = +l.m_money_positions_long_all    || 0;
-  const mmS  = +l.m_money_positions_short_all   || 0;
-  const prL  = +l.prod_merc_positions_long_all  || 0;
-  const prS  = +l.prod_merc_positions_short_all || 0;
-
-  if (mmL === 0 && mmS === 0) return null; // fila vacía
-
-  const mmNet   = mmL - mmS;
-  const prodNet = prL - prS;
-  const pmmNet  = p ? ((+p.m_money_positions_long_all  || 0) - (+p.m_money_positions_short_all  || 0)) : mmNet;
-  const pprod   = p ? ((+p.prod_merc_positions_long_all || 0) - (+p.prod_merc_positions_short_all || 0)) : prodNet;
-
-  return {
-    mmNet:      Math.round(mmNet),
-    mmChange:   Math.round(mmNet  - pmmNet),
-    prodNet:    Math.round(prodNet),
-    prodChange: Math.round(prodNet - pprod),
-    reportDate: _cot_dateToMonday(l.report_date_as_yyyy_mm_dd),
-  };
-}
-
-function _cot_dateToMonday(dateStr) {
-  if (!dateStr) return localDateStr(new Date());
-  const d   = new Date(dateStr + 'T12:00:00');
-  const dow = d.getDay();                            // 0=dom … 6=sab
-  const diff = dow === 1 ? 0 : dow === 0 ? -6 : 1 - dow;
-  d.setDate(d.getDate() + diff);
-  return localDateStr(d);
-}
-
-// ── Alias de compatibilidad (otras partes del código pueden llamarlos) ──
-async function _fetchCOTData()   { return _cot_fetchCFTC(); }
-async function _fetchGoldPrice() { return (await _cot_yahoo('GC=F')) || _cot_coinbaseGold(); }
-async function _fetchStooq(sym)  { return _cot_yahoo(sym); }
+// ── Aliases de compatibilidad ─────────────────────────────────────
+async function _fetchGoldPrice() { return (await _fetchYahoo('GC=F')) || _fetchCoinbaseGold(); }
+async function _fetchStooq(sym)  { return _fetchYahoo(sym); }
 
 
 
